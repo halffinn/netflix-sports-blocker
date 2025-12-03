@@ -45,31 +45,37 @@ const KEYWORDS = {
 
 let enabledSports = [];
 let activeKeywords = [];
+let debounceTimer = null;
 
 // Initialize
 chrome.storage.sync.get(['blockedSports'], (result) => {
   updateConfiguration(result.blockedSports);
-  // Start observing the page for changes (infinite scroll, etc)
-  const observer = new MutationObserver(processPage);
+  
+  // Initial run
+  processPage();
+
+  // Watch for changes, but debounced to prevent performance issues
+  const observer = new MutationObserver(() => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(processPage, 500);
+  });
+  
   observer.observe(document.body, { childList: true, subtree: true });
 });
 
-// Listen for updates from the popup
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === "UPDATE_SETTINGS") {
     chrome.storage.sync.get(['blockedSports'], (result) => {
       updateConfiguration(result.blockedSports);
-      processPage(); // Re-run immediately
+      processPage();
     });
   }
 });
 
 function updateConfiguration(blockedSports) {
   if (!blockedSports) return;
-  
   enabledSports = Object.keys(blockedSports).filter(key => blockedSports[key]);
   
-  // Flatten keywords into a single regex-friendly list
   activeKeywords = [];
   enabledSports.forEach(sport => {
     if (KEYWORDS[sport]) {
@@ -81,59 +87,75 @@ function updateConfiguration(blockedSports) {
 function processPage() {
   if (activeKeywords.length === 0) return;
 
-  // We look for common container elements that hold articles or headlines
-  // This list can be expanded based on specific sites (Twitter, Reddit, ESPN, etc.)
-  const targetTags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'div', 'li', 'article'];
-  
-  // Specific classes often used for content cards (heuristic approach)
-  const elements = document.querySelectorAll(targetTags.join(','));
+  // TreeWalker is efficient at finding text nodes specifically
+  const walker = document.createTreeWalker(
+    document.body,
+    NodeFilter.SHOW_TEXT,
+    null,
+    false
+  );
 
-  elements.forEach(element => {
-    // Skip if already processed or is a child of a processed element
-    if (element.dataset.nsSpoilerChecked) return;
-    
-    // Check if this is a leaf node or close to it (text content)
-    // We don't want to blur the whole <body> tag
-    if (element.children.length > 5) return; 
+  let node;
+  const nodesToBlur = [];
 
-    const text = element.textContent;
-    if (!text) return;
+  while (node = walker.nextNode()) {
+    // 1. Skip if already processed
+    if (node.parentElement && node.parentElement.dataset.nsSpoilerBlur) continue;
 
-    // Check if any keyword matches
+    // 2. Skip tiny text (whitespace)
+    if (node.textContent.trim().length < 3) continue;
+
+    // 3. Skip inputs and scripts
+    const tag = node.parentElement ? node.parentElement.tagName : '';
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEXTAREA' || tag === 'INPUT') continue;
+
+    // 4. Check for keywords
+    const text = node.textContent;
     const hasSpoiler = activeKeywords.some(keyword => 
       text.toLowerCase().includes(keyword.toLowerCase())
     );
 
     if (hasSpoiler) {
-      blurElement(element);
+      // Find the best parent to blur. 
+      // Usually the immediate parent, but sometimes we want to go up one level 
+      // if the text is inside a <b> or <a> tag within a larger sentence.
+      let target = node.parentElement;
+      
+      // Heuristic: If the parent is an inline element like <b>, <i>, <a>, 
+      // we might want to blur the container (like <p>) so the context is hidden too.
+      // But for strict granular blocking, we stick to the closest block-level or significant element.
+      nodesToBlur.push(target);
     }
-    
-    element.dataset.nsSpoilerChecked = "true";
-  });
+  }
+
+  // Apply the blur
+  nodesToBlur.forEach(blurElement);
 }
 
 function blurElement(element) {
-  // Check if we already blurred a parent; if so, no need to blur this child
+  // Check if a parent is already blurred to avoid double-blurring
   let parent = element.parentElement;
   while (parent) {
-    if (parent.dataset.nsSpoilerBlur) return;
+    if (parent.dataset.nsSpoilerBlur === "true") return;
     parent = parent.parentElement;
   }
 
-  // Apply visual blur
   element.style.filter = "blur(6px)";
+  element.style.userSelect = "none"; // Prevent highlighting to read
   element.style.cursor = "pointer";
-  element.style.transition = "filter 0.3s";
-  element.dataset.nsSpoilerBlur = "true";
+  element.style.transition = "all 0.3s ease";
   
-  // Add tooltip or indication
+  // Mark as processed
+  element.dataset.nsSpoilerBlur = "true";
   element.title = "Spoiler blocked! Click to reveal.";
 
-  // Add click to reveal listener
+  // Click to reveal logic
   element.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
     element.style.filter = "none";
-    element.dataset.nsSpoilerBlur = "false";
+    element.style.userSelect = "auto";
+    element.style.cursor = "auto";
+    element.dataset.nsSpoilerBlur = "revealed"; // Mark as revealed so we don't re-blur it
   }, { once: true });
 }
