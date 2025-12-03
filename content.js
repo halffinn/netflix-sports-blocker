@@ -212,10 +212,12 @@ function processPage() {
   );
 
   let node;
-  const nodesToBlur = [];
+  // We collect the text nodes first, then process them, to avoid issues with the TreeWalker
+  // getting confused as we modify the DOM structure on the fly.
+  const textNodesToWrap = [];
 
   while (node = walker.nextNode()) {
-    // 1. Skip if already processed
+    // 1. Skip if already processed (checked on parent, as the wrapper will become the parent)
     if (node.parentElement && node.parentElement.dataset.nsSpoilerBlur) continue;
 
     // 2. Skip tiny text (whitespace)
@@ -232,46 +234,46 @@ function processPage() {
     );
 
     if (hasSpoiler) {
-      // Find the best parent to blur. 
-      // Usually the immediate parent, but sometimes we want to go up one level 
-      // if the text is inside a <b> or <a> tag within a larger sentence.
-      let target = node.parentElement;
-      
-      // Heuristic: If the parent is an inline element like <b>, <i>, <a>, 
-      // we might want to blur the container (like <p>) so the context is hidden too.
-      // But for strict granular blocking, we stick to the closest block-level or significant element.
-      nodesToBlur.push(target);
+      textNodesToWrap.push(node);
     }
   }
 
-  // Apply the blur
-  nodesToBlur.forEach(blurElement);
+  // Apply the wrap and blur to collected nodes
+  textNodesToWrap.forEach(wrapAndBlur);
 }
 
-function blurElement(element) {
-  // Check if a parent is already blurred to avoid double-blurring
-  let parent = element.parentElement;
-  while (parent) {
-    if (parent.dataset.nsSpoilerBlur === "true") return;
-    parent = parent.parentElement;
-  }
+function wrapAndBlur(textNode) {
+  // Final safety check: make sure it wasn't already wrapped between collection and processing
+  if (textNode.parentNode && textNode.parentNode.dataset.nsSpoilerBlur) return;
 
-  element.style.filter = "blur(6px)";
-  element.style.userSelect = "none"; // Prevent highlighting to read
-  element.style.cursor = "pointer";
-  element.style.transition = "all 0.3s ease";
+  const parent = textNode.parentNode;
+  if (!parent) return;
+
+  // 1. Create the wrapper span
+  const wrapper = document.createElement('span');
   
-  // Mark as processed
-  element.dataset.nsSpoilerBlur = "true";
-  element.title = "Spoiler blocked! Click to reveal.";
+  // 2. Apply styles to the wrapper
+  wrapper.style.filter = "blur(6px)";
+  wrapper.style.userSelect = "none"; // Prevent highlighting to read
+  wrapper.style.cursor = "pointer";
+  wrapper.style.transition = "all 0.3s ease";
+  wrapper.style.display = "inline-block"; // Ensures filter works correctly on inline text
+  
+  // Mark as processed and add tooltip
+  wrapper.dataset.nsSpoilerBlur = "true";
+  wrapper.title = "Spoiler blocked! Click to reveal.";
 
-  // Click to reveal logic
-  element.addEventListener('click', (e) => {
+  // 3. Click to reveal logic
+  wrapper.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
-    element.style.filter = "none";
-    element.style.userSelect = "auto";
-    element.style.cursor = "auto";
-    element.dataset.nsSpoilerBlur = "revealed"; // Mark as revealed so we don't re-blur it
+    wrapper.style.filter = "none";
+    wrapper.style.userSelect = "auto";
+    wrapper.style.cursor = "auto";
+    wrapper.dataset.nsSpoilerBlur = "revealed"; // Mark as revealed so we don't re-blur it
   }, { once: true });
+
+  // 4. Perform the DOM swap: insert wrapper before text node, then move text node inside wrapper.
+  parent.insertBefore(wrapper, textNode);
+  wrapper.appendChild(textNode);
 }
